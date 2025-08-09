@@ -1,55 +1,84 @@
 import os
-from flask import Flask, request
-import telebot
-from pytube import YouTube
-import tempfile
+import time
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-API_TOKEN = os.environ.get("BOT_TOKEN")
-bot = telebot.TeleBot(API_TOKEN)
-server = Flask(__name__)
+# Environment variables se values lo (Render me set karoge)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-@bot.message_handler(commands=['start'])
-def start_message(message):
-    bot.reply_to(message, "Hello! Please Send Video Link To Download Video.")
+# Memory storage (Render restart hone pe reset ho jayega)
+premium_keys = {}   # {key: expire_timestamp}
+premium_users = {}  # {user_id: expire_timestamp}
 
-@bot.message_handler(func=lambda message: True)
-def download_youtube_video(message):
-    url = message.text.strip()
-    try:
-        # YouTube object banaiye
-        yt = YouTube(url)
-        stream = yt.streams.get_highest_resolution()
 
-        # Temporary file mein video download karen
-        temp_dir = tempfile.gettempdir()
-        file_path = stream.download(output_path=temp_dir)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 Welcome!\n"
+        "🔑 Use your premium key to activate premium features.\n"
+        "Format: /key <your-key>"
+    )
 
-        # Video file Telegram chat me bhejein (20MB se choti files ke liye)
-        if os.path.getsize(file_path) < 20 * 1024 * 1024:
-            with open(file_path, 'rb') as video:
-                bot.send_video(message.chat.id, video, caption=f"Yeh raha video: {yt.title}")
-        else:
-            bot.reply_to(message, "Sorry, video size bahut bada hai, upload nahi kar sakta.")
 
-        # File delete karen after sending
-        os.remove(file_path)
+async def genk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Admin check
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized.")
+        return
 
-    except Exception as e:
-        bot.reply_to(message, f"Error aaya: {str(e)}\nPlease sahi YouTube video link bhejein.")
+    # Check args
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /genk <days>")
+        return
 
-# Flask routes for webhook
-@server.route('/' + API_TOKEN, methods=['POST'])
-def getMessage():
-    json_str = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return "!", 200
+    days = int(context.args[0])
+    key = f"PREMIUM-{int(time.time())}"
+    expire = int(time.time()) + days * 86400
+    premium_keys[key] = expire
 
-@server.route("/")
-def webhook_set():
-    bot.remove_webhook()
-    bot.set_webhook(url=os.environ.get("RENDER_EXTERNAL_URL") + "/" + API_TOKEN)
-    return "Webhook set!", 200
+    await update.message.reply_text(
+        f"✅ Premium key generated:\n`{key}`\nValid for {days} day(s)",
+        parse_mode="Markdown"
+    )
+
+
+async def key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /key <your-key>")
+        return
+
+    key_value = context.args[0]
+
+    if key_value in premium_keys:
+        expire = premium_keys.pop(key_value)
+        premium_users[update.effective_user.id] = expire
+        await update.message.reply_text(
+            f"🎉 Premium activated!\nValid until: {time.ctime(expire)}"
+        )
+    else:
+        await update.message.reply_text("❌ Invalid or expired key.")
+
+
+async def checkpremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid in premium_users and premium_users[uid] > time.time():
+        await update.message.reply_text(
+            f"✅ You are premium until: {time.ctime(premium_users[uid])}"
+        )
+    else:
+        await update.message.reply_text("❌ You are not premium.")
+
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("genk", genk))
+    app.add_handler(CommandHandler("key", key))
+    app.add_handler(CommandHandler("checkpremium", checkpremium))
+
+    app.run_polling()
+
 
 if __name__ == "__main__":
-    server.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    main()
